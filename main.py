@@ -43,6 +43,7 @@ import tensorflow as tf
 import numpy as np
 from tensorflow.keras.preprocessing import image
 from fastapi.staticfiles import StaticFiles
+from xml.sax.saxutils import escape
 
 
 # Load your trained model
@@ -457,34 +458,31 @@ def get_case_by_id(case_id: int, db: Session = Depends(get_db)):
                 findings_list = []
 
         return {
-    "id": case.id,
-    "case_code": case.case_code,
-    "patient_id": case.patient_id,
-    "patient_name": case.patient_name,
-    "patient_age": case.patient_age,
-    "patient_gender": patient.gender if patient else "N/A",
-
-    "diagnosis": case.diagnosis,
-    "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
-
-    # ✅ FIXED HERE
-    "ai_result": case.ai_result or case.diagnosis or "Pending AI...",
-    "ai_confidence": (case.ai_confidence / 100) if case.ai_confidence else 0,
-
-    "ai_findings": case.ai_findings,
-    "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
-    "decision": case.decision.value if hasattr(case.decision, 'value') else str(case.decision),
-    "image_url": case.image_url,
-    "created_at": case.created_at,
-    "clinical_notes": case.doctor_notes or "Clinical correlation recommended.",
-    "final_diagnosis": case.final_diagnosis,
-    "doctor_id": case.doctor_id
-}
+            "id": case.id,
+            "case_code": case.case_code,
+            "patient_id": case.patient_id,
+            "patient_name": case.patient_name,
+            "patient_age": case.patient_age,
+            "patient_gender": patient.gender if patient else "N/A",
+            "diagnosis": case.diagnosis,
+            "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
+            "ai_result": case.ai_result or case.diagnosis or "Pending AI...",
+            "ai_confidence": round((case.ai_confidence / 100), 2) if case.ai_confidence else 0,
+            "ai_findings": case.ai_findings or "",
+            "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+            "decision": case.decision.value if hasattr(case.decision, 'value') else str(case.decision),
+            "image_url": case.image_url or "",
+            "created_at": case.created_at.isoformat() if case.created_at else None,
+            "clinical_notes": case.doctor_notes or "Clinical correlation recommended.",
+            "final_diagnosis": case.final_diagnosis or "",
+            "doctor_id": case.doctor_id,
+            "reviewed_at": case.reviewed_at.isoformat() if case.reviewed_at else None
+        }
     
     # Fallback to legacy Case table
     legacy_case = db.query(Case).filter(Case.id == case_id).first()
     if legacy_case:
-         return {
+        return {
             "id": legacy_case.id,
             "case_code": getattr(legacy_case, "case_code", f"CASE-{legacy_case.id}"),
             "patient_name": legacy_case.patient_name,
@@ -492,12 +490,14 @@ def get_case_by_id(case_id: int, db: Session = Depends(get_db)):
             "patient_gender": "N/A",
             "diagnosis": legacy_case.diagnosis,
             "priority": "Routine",
-            "ai_result": legacy_case.ai_result,
-            "ai_confidence": legacy_case.ai_confidence,
+            "ai_result": legacy_case.ai_result or "",
+            "ai_confidence": (legacy_case.ai_confidence / 100) if legacy_case.ai_confidence else 0,
             "clinical_notes": getattr(legacy_case, "doctor_notes", ""),
             "status": "COMPLETED",
-            "image_url": legacy_case.image_url,
-            "created_at": legacy_case.created_at
+            "image_url": legacy_case.image_url or "",
+            "created_at": legacy_case.created_at.isoformat() if legacy_case.created_at else None,
+            "final_diagnosis": getattr(legacy_case, "final_diagnosis", ""),
+            "doctor_id": getattr(legacy_case, "doctor_id", None)
         }
         
     raise HTTPException(status_code=404, detail="Case not found")
@@ -1078,21 +1078,25 @@ def get_case_queue(doctor_id: int, db: Session = Depends(get_db)):
 # =====================================================
 @app.get("/critical-alerts")
 def critical_alerts(doctor_id: int, db: Session = Depends(get_db)):
-
-    return db.query(TriageCase).filter(
+    cases = db.query(TriageCase).filter(
         TriageCase.doctor_id == doctor_id,
         TriageCase.priority.in_([PriorityEnum.CRITICAL, PriorityEnum.URGENT])
     ).all()
 
-    if priority:
-        query = query.filter(TriageCase.priority == PriorityEnum(priority))
-    else:
-        query = query.filter(
-            (TriageCase.priority == PriorityEnum.CRITICAL) |
-            (TriageCase.priority == PriorityEnum.URGENT)
-        )
-
-    return query.all()
+    return [
+        {
+            "id": case.id,
+            "case_code": case.case_code,
+            "patient_name": case.patient_name,
+            "patient_age": case.patient_age,
+            "diagnosis": case.diagnosis,
+            "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
+            "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+            "created_at": case.created_at.isoformat() if case.created_at else None,
+            "ai_result": case.ai_result or "Pending"
+        }
+        for case in cases
+    ]
 
 @app.get("/triage-dashboard")
 def get_dashboard(doctor_id: int, db: Session = Depends(get_db)):
@@ -1103,7 +1107,21 @@ def get_dashboard(doctor_id: int, db: Session = Depends(get_db)):
 
     print("🔥 Dashboard cases count:", len(cases))
 
-    return cases
+    return [
+        {
+            "id": case.id,
+            "case_code": case.case_code,
+            "patient_name": case.patient_name,
+            "patient_age": case.patient_age,
+            "diagnosis": case.diagnosis,
+            "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
+            "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+            "created_at": case.created_at.isoformat() if case.created_at else None,
+            "ai_result": case.ai_result or "Pending",
+            "decision": case.decision.value if hasattr(case.decision, 'value') else str(case.decision)
+        }
+        for case in cases
+    ]
 
 def _priority_meta(priority: Optional[PriorityEnum]):
     """Return UI metadata for a priority value.
@@ -1202,7 +1220,19 @@ def medical_history(patient_name: str, doctor_id: int, db: Session = Depends(get
         TriageCase.patient_name == patient_name
     ).order_by(TriageCase.created_at.desc()).all()
 
-    return cases
+    return [
+        {
+            "case_id": case.id,
+            "patient_name": case.patient_name,
+            "diagnosis": case.diagnosis,
+            "final_diagnosis": case.final_diagnosis or case.diagnosis,
+            "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
+            "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+            "created_at": case.created_at.isoformat() if case.created_at else None,
+            "reviewed_at": case.reviewed_at.isoformat() if case.reviewed_at else None
+        }
+        for case in cases
+    ]
 
 # =====================================================
 # PATIENT DETAIL + SCAN HISTORY
@@ -1281,8 +1311,9 @@ def _build_report_pdf(case_obj):
     os.makedirs("reports", exist_ok=True)
 
     # Make the filename safe (remove spaces/special characters).
-    safe_name = "".join(c for c in case_obj.patient_name if c.isalnum() or c in ("_", "-"))
-    file_name = f"Medical_Report_{safe_name}.pdf"
+    patient_name = case_obj.patient_name or "Unknown"
+    safe_name = "".join(c for c in patient_name if c.isalnum() or c in ("_", "-"))
+    file_name = f"Medical_Report_{safe_name}_{case_obj.id}.pdf"
     file_path = os.path.join("reports", file_name)
 
     doc = SimpleDocTemplate(file_path)
@@ -1292,27 +1323,38 @@ def _build_report_pdf(case_obj):
     elements.append(Paragraph(f"<b>Medical Report</b>", styles["Title"]))
     elements.append(Spacer(1, 0.5 * inch))
 
-    elements.append(Paragraph(f"Report ID: {case_obj.report_id}", styles["Normal"]))
-    elements.append(Paragraph(f"Patient Name: {case_obj.patient_name}", styles["Normal"]))
-    elements.append(Paragraph(f"Age: {case_obj.patient_age}", styles["Normal"]))
+    report_id = case_obj.report_id or f"RPT-{case_obj.id}"
+    elements.append(Paragraph(f"Report ID: {report_id}", styles["Normal"]))
+    elements.append(Paragraph(f"Patient Name: {patient_name}", styles["Normal"]))
+    patient_age = case_obj.patient_age or "N/A"
+    elements.append(Paragraph(f"Age: {patient_age}", styles["Normal"]))
     elements.append(Spacer(1, 0.3 * inch))
 
     elements.append(Paragraph("<b>AI Findings:</b>", styles["Heading2"]))
-    elements.append(Paragraph(case_obj.ai_findings or "N/A", styles["Normal"]))
+    ai_findings = case_obj.ai_findings or "N/A"
+    elements.append(Paragraph(escape(str(ai_findings)), styles["Normal"]))
     elements.append(Spacer(1, 0.3 * inch))
 
     elements.append(Paragraph("<b>Final Diagnosis:</b>", styles["Heading2"]))
-    elements.append(Paragraph(case_obj.final_diagnosis or "N/A", styles["Normal"]))
+    final_diagnosis = case_obj.final_diagnosis or "N/A"
+    elements.append(Paragraph(escape(str(final_diagnosis)), styles["Normal"]))
     elements.append(Spacer(1, 0.3 * inch))
 
     elements.append(Paragraph("<b>Doctor Notes:</b>", styles["Heading2"]))
-    elements.append(Paragraph(case_obj.doctor_notes or "N/A", styles["Normal"]))
+    doctor_notes = case_obj.doctor_notes or "N/A"
+    elements.append(Paragraph(escape(str(doctor_notes)), styles["Normal"]))
     elements.append(Spacer(1, 0.5 * inch))
 
-    elements.append(Paragraph(f"Signed By: {case_obj.signed_by}", styles["Normal"]))
-    elements.append(Paragraph(f"Date: {case_obj.reviewed_at}", styles["Normal"]))
+    signed_by = case_obj.signed_by or "Not signed"
+    elements.append(Paragraph(f"Signed By: {signed_by}", styles["Normal"]))
+    reviewed_at = case_obj.reviewed_at or "N/A"
+    elements.append(Paragraph(f"Date: {reviewed_at}", styles["Normal"]))
 
-    doc.build(elements)
+    try:
+        doc.build(elements)
+    except Exception as e:
+        print(f"🔥 PDF BUILD ERROR: {str(e)}")
+        raise
 
     return file_path, file_name
 
@@ -1320,13 +1362,28 @@ def _build_report_pdf(case_obj):
 @app.get("/case/{case_id}/download-pdf")
 def download_pdf(case_id: int, db: Session = Depends(get_db)):
 
-    case_obj = get_case_obj(case_id, db)
+    try:
+        case_obj = get_case_obj(case_id, db)
 
-    if not case_obj.finalized:
-        raise HTTPException(status_code=400, detail="Report not finalized")
+        print("🔥 CASE DATA:", case_obj.__dict__)
 
-    file_path, file_name = _build_report_pdf(case_obj)
-    return FileResponse(file_path, media_type='application/pdf', filename=file_name)
+        if not case_obj.finalized:
+            raise HTTPException(status_code=400, detail="Report not finalized")
+
+        file_path, file_name = _build_report_pdf(case_obj)
+
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=500, detail="Report file not generated")
+
+        return FileResponse(file_path, media_type='application/pdf', filename=file_name)
+
+    except HTTPException:
+        # Re-raise HTTP exceptions with their original status codes
+        raise
+    except Exception as e:
+        print("🔥 PDF ERROR:", str(e))   # 👈 CRITICAL
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/case/{case_id}/report-sent")
@@ -1374,7 +1431,13 @@ def create_case(scan_id: int, doctor_id: int, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_case)
 
-    return new_case
+    return {
+        "id": new_case.id,
+        "scan_id": new_case.scan_id,
+        "doctor_id": new_case.doctor_id,
+        "status": new_case.status,
+        "created_at": new_case.created_at.isoformat() if new_case.created_at else None
+    }
 
 @app.put("/case/{case_id}/other-condition")
 def other_condition(case_id: int, data: OtherConditionRequest, db: Session = Depends(get_db)):
@@ -1418,7 +1481,33 @@ def finalize_case(case_id: int, data: FinalizeRequest, db: Session = Depends(get
 
 @app.get("/case/{case_id}/generate-report")
 def generate_report(case_id: int, db: Session = Depends(get_db)):
-    return get_case_by_id(case_id, db)
+    try:
+        print(f"📋 Generating report for case {case_id}")
+        case_obj = get_case_obj(case_id, db)
+        
+        print(f"📋 Case found: {case_obj}")
+        print(f"📋 Finalized: {case_obj.finalized}")
+        
+        if not case_obj.finalized:
+            print(f"⚠️ Case not finalized")
+            raise HTTPException(status_code=400, detail="Case not finalized yet. Please finalize the case first.")
+        
+        file_path, file_name = _build_report_pdf(case_obj)
+        print(f"📋 PDF generated: {file_path}")
+        
+        return {
+            "message": "Report generated successfully",
+            "file_name": file_name,
+            "download_url": f"/case/{case_id}/download-pdf",
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"🔥 REPORT GENERATION ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
 # =====================================================
 # REPORT PREVIEW + FINALIZE
