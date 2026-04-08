@@ -457,26 +457,29 @@ def get_case_by_id(case_id: int, db: Session = Depends(get_db)):
                 findings_list = []
 
         return {
-            "id": case.id,
-            "case_code": case.case_code,
-            "patient_id": case.patient_id,
-            "patient_name": case.patient_name,
-            "patient_age": case.patient_age,
-            "patient_gender": patient.gender if patient else (case.patient_gender if hasattr(case, 'patient_gender') else "N/A"),
-            "diagnosis": case.diagnosis,
-            "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
-            "ai_result": case.final_diagnosis or "No specific findings detected.",
-            "ai_confidence": (case.ai_confidence / 100) if case.ai_confidence is not None else 0,
-            "ai_findings": case.ai_findings,
-            "findings": findings_list,
-            "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
-            "decision": case.decision.value if hasattr(case.decision, 'value') else str(case.decision),
-            "image_url": case.image_url,
-            "created_at": case.created_at,
-            "clinical_notes": case.doctor_notes or "Clinical correlation recommended.",
-            "final_diagnosis": case.final_diagnosis,
-            "doctor_id": case.doctor_id
-        }
+    "id": case.id,
+    "case_code": case.case_code,
+    "patient_id": case.patient_id,
+    "patient_name": case.patient_name,
+    "patient_age": case.patient_age,
+    "patient_gender": patient.gender if patient else "N/A",
+
+    "diagnosis": case.diagnosis,
+    "priority": case.priority.value if hasattr(case.priority, 'value') else str(case.priority),
+
+    # ✅ FIXED HERE
+    "ai_result": case.ai_result or case.diagnosis or "Pending AI...",
+    "ai_confidence": (case.ai_confidence / 100) if case.ai_confidence else 0,
+
+    "ai_findings": case.ai_findings,
+    "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+    "decision": case.decision.value if hasattr(case.decision, 'value') else str(case.decision),
+    "image_url": case.image_url,
+    "created_at": case.created_at,
+    "clinical_notes": case.doctor_notes or "Clinical correlation recommended.",
+    "final_diagnosis": case.final_diagnosis,
+    "doctor_id": case.doctor_id
+}
     
     # Fallback to legacy Case table
     legacy_case = db.query(Case).filter(Case.id == case_id).first()
@@ -1247,7 +1250,7 @@ def patient_detail(patient_id: int, db: Session = Depends(get_db)):
 # =====================================================
 @app.get("/case/{case_id}/final-diagnosis")
 def final_diagnosis(case_id: int, db: Session = Depends(get_db)):
-    return get_case(case_id, db)
+    return get_case_by_id(case_id, db)
 
 @app.put("/case/{case_id}/confirm-ai")
 def confirm_ai(case_id: int, data: dict, db: Session = Depends(get_db)):
@@ -1415,7 +1418,7 @@ def finalize_case(case_id: int, data: FinalizeRequest, db: Session = Depends(get
 
 @app.get("/case/{case_id}/generate-report")
 def generate_report(case_id: int, db: Session = Depends(get_db)):
-    return get_case(case_id, db)
+    return get_case_by_id(case_id, db)
 
 # =====================================================
 # REPORT PREVIEW + FINALIZE
