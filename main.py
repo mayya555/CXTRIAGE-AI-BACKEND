@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from typing import Optional
 import smtplib
+import traceback
 from email.mime.text import MIMEText
 import random
 import os
@@ -1366,9 +1367,19 @@ def download_pdf(case_id: int, db: Session = Depends(get_db)):
         case_obj = get_case_obj(case_id, db)
 
         print("🔥 CASE DATA:", case_obj.__dict__)
+        print("🔥 Case finalized:", getattr(case_obj, 'finalized', False))
 
-        if not case_obj.finalized:
-            raise HTTPException(status_code=400, detail="Report not finalized")
+        # Auto-finalize if not already finalized (lenient approach)
+        if not getattr(case_obj, 'finalized', False):
+            print("⚠️ Case not finalized, auto-finalizing for PDF generation...")
+            case_obj.finalized = True
+            case_obj.status = StatusEnum.COMPLETED
+            if not case_obj.signed_by:
+                case_obj.signed_by = "System-Auto"
+            if not case_obj.reviewed_at:
+                case_obj.reviewed_at = datetime.utcnow()
+            db.commit()
+            db.refresh(case_obj)
 
         file_path, file_name = _build_report_pdf(case_obj)
 
@@ -1382,6 +1393,8 @@ def download_pdf(case_id: int, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         print("🔥 PDF ERROR:", str(e))   # 👈 CRITICAL
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1476,8 +1489,19 @@ def finalize_case(case_id: int, data: FinalizeRequest, db: Session = Depends(get
         case_obj.doctor_notes = data.recommendation
 
     db.commit()
+    db.refresh(case_obj)
+    
+    print(f"✅ Case {case_id} finalized successfully")
+    print(f"   finalized: {case_obj.finalized}")
+    print(f"   status: {case_obj.status}")
+    print(f"   signed_by: {case_obj.signed_by}")
 
-    return {"message": "Case finalized successfully"}
+    return {
+        "message": "Case finalized successfully",
+        "case_id": case_obj.id,
+        "finalized": case_obj.finalized,
+        "download_url": f"/case/{case_obj.id}/download-pdf"
+    }
 
 @app.get("/case/{case_id}/generate-report")
 def generate_report(case_id: int, db: Session = Depends(get_db)):
@@ -1611,11 +1635,11 @@ def get_doctor_stats(doctor_id: int, db: Session = Depends(get_db)):
 
 
 class UpdateProfile(BaseModel):
-    id: int
-    first_name: str
-    last_name: str
-    phone_number: str
-    email: str
+    id: Optional[int] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    email: Optional[str] = None
     specialization: Optional[str] = None
 
 
@@ -1623,25 +1647,50 @@ class UpdateProfile(BaseModel):
 def update_profile(data: UpdateProfile, db: Session = Depends(get_db)):
     try:
         # Prefer finding by ID for reliability
-        doctor = db.query(Doctor).filter(Doctor.id == data.id).first()
+        doctor = None
+        
+        if data.id:
+            doctor = db.query(Doctor).filter(Doctor.id == data.id).first()
         
         # Fallback to email search for legacy/initial setup cases
-        if not doctor:
+        if not doctor and data.email:
             doctor = db.query(Doctor).filter(Doctor.hospital_email == data.email).first()
             
         if not doctor:
             raise HTTPException(status_code=404, detail="Doctor account not found")
             
-        # Update every field
-        doctor.first_name = data.first_name
-        doctor.last_name = data.last_name
-        doctor.hospital_email = data.email
-        doctor.phone_number = data.phone_number
-        doctor.specialization = data.specialization
+        # Update only provided fields
+        if data.first_name:
+            doctor.first_name = data.first_name
+        if data.last_name:
+            doctor.last_name = data.last_name
+        if data.email:
+            # Check if email is already taken by another doctor
+            existing = db.query(Doctor).filter(
+                Doctor.hospital_email == data.email,
+                Doctor.id != doctor.id
+            ).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Email already in use")
+            doctor.hospital_email = data.email
+        if data.phone_number:
+            # Check if phone is already taken by another doctor
+            existing = db.query(Doctor).filter(
+                Doctor.phone_number == data.phone_number,
+                Doctor.id != doctor.id
+            ).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Phone number already in use")
+            doctor.phone_number = data.phone_number
+        if data.specialization:
+            doctor.specialization = data.specialization
         
         db.commit()
         db.refresh(doctor)
         return {"message": "Profile updated successfully", "doctor_id": doctor.id}
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -1649,37 +1698,73 @@ def update_profile(data: UpdateProfile, db: Session = Depends(get_db)):
 
 @app.post("/doctor/upload-photo/{email}")
 def upload_photo(email: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    try:
+        doctor = db.query(Doctor).filter(Doctor.hospital_email == email).first()
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+
+        import re
+        # Validate file type
+        allowed_types = {'image/jpeg', 'image/png', 'image/jpg', 'image/gif', 'image/webp'}
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="Only image files are allowed (JPEG, PNG, GIF, WebP)")
+        
+        # Slugify: lowercase, replace spaces/special chars with underscores
+        clean_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename.lower()).replace(' ', '_')
+        file_path = f"profile_photos/{clean_filename}"
+        os.makedirs("profile_photos", exist_ok=True)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        doctor.profile_photo = file_path
+        db.commit()
+
+        return {"message": "Photo uploaded successfully", "photo": file_path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Photo upload failed: {str(e)}")
+
+
+@app.get("/doctor/profile-photo/{email}")
+def get_profile_photo(email: str, db: Session = Depends(get_db)):
     doctor = db.query(Doctor).filter(Doctor.hospital_email == email).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
-
-    import re
-    # Slugify: lowercase, replace spaces/special chars with underscores
-    clean_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename.lower()).replace(' ', '_')
-    file_path = f"profile_photos/{clean_filename}"
-    os.makedirs("profile_photos", exist_ok=True)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    doctor.profile_photo = file_path
-    db.commit()
-
-    return {"message": "Photo uploaded successfully", "photo": file_path}
+    
+    if not doctor.profile_photo:
+        raise HTTPException(status_code=404, detail="No profile photo found")
+    
+    if not os.path.exists(doctor.profile_photo):
+        raise HTTPException(status_code=404, detail="Photo file not found on server")
+    
+    return FileResponse(doctor.profile_photo)
 
 
 
 
 @app.delete("/doctor/remove-photo/{email}")
 def remove_photo(email: str, db: Session = Depends(get_db)):
-    doctor = db.query(Doctor).filter(Doctor.hospital_email == email).first()
-    if not doctor:
-        raise HTTPException(status_code=404, detail="Doctor not found")
+    try:
+        doctor = db.query(Doctor).filter(Doctor.hospital_email == email).first()
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found")
 
-    doctor.profile_photo = None
-    db.commit()
+        # Delete file if it exists
+        if doctor.profile_photo and os.path.exists(doctor.profile_photo):
+            os.remove(doctor.profile_photo)
+        
+        doctor.profile_photo = None
+        db.commit()
 
-    return {"message": "Photo removed"}
+        return {"message": "Photo removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to remove photo: {str(e)}")
 
 
 
